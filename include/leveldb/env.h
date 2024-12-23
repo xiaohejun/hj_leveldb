@@ -162,7 +162,7 @@ class LEVELDB_EXPORT Env {
    * @param file_size 文件大小
    * @return Status 是否成功
    */
-  virtual Status GetFileSize(const std::string& fname, uint64_t* file_size);
+  virtual Status GetFileSize(const std::string& fname, uint64_t* file_size) = 0;
 
   /**
    * @brief 重命名文件从src到target
@@ -196,7 +196,7 @@ class LEVELDB_EXPORT Env {
    * @param lock 要释放的锁
    * @return Status 是否成功
    */
-  virtual Status UnLockFile(FileLock* lock);
+  virtual Status UnlockFile(FileLock* lock) = 0;
 
   /**
    * @brief 将(*function)(arg)加入后台线程调度，function可能通过一个
@@ -214,16 +214,16 @@ class LEVELDB_EXPORT Env {
    * @param function thread调度执行的函数
    * @param arg 传入function的参数
    */
-  virtual void StartThread(void (*function)(void* arg), void* arg) = 0l
+  virtual void StartThread(void (*function)(void* arg), void* arg) = 0;
 
-      /**
-       * @brief *path目录可以用来进行测试，它可能是刚刚创建的，也可能不是。
-       * 同一进程的运行之间的目录可能会或可能不会不同，但后续调用将返回相同的目录。
-       *
-       * @param path
-       * @return Status
-       */
-      virtual Status GetTestDirectory(std : string * path) = 0;
+  /**
+   * @brief *path目录可以用来进行测试，它可能是刚刚创建的，也可能不是。
+   * 同一进程的运行之间的目录可能会或可能不会不同，但后续调用将返回相同的目录。
+   *
+   * @param path
+   * @return Status
+   */
+  virtual Status GetTestDirectory(std::string* path) = 0;
 
   /**
    * @brief 创建并返回用于存储信息性消息的日志文件。
@@ -285,7 +285,7 @@ class LEVELDB_EXPORT SequentialFile {
    * @param n
    * @return status
    */
-  virtual status Skip(size_t n) = 0;
+  virtual Status Skip(size_t n) = 0;
 };
 
 /**
@@ -313,7 +313,7 @@ class LEVELDB_EXPORT RandomAccessFile {
    * @param scratch
    * @return Status
    */
-  virtual Status Read(uint64_t offset, size_t n, Slice* result, char* scratch);
+  virtual Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) = 0;
 };
 
 /**
@@ -405,6 +405,16 @@ void Log(Logger* info_log, const char* format, ...)
 LEVELDB_EXPORT Status WriteStringToFile(Env* env, const Slice& data, const std::string& fname);
 
 /**
+ * @brief 实用函数：将data写入文件fname，并且同步数据到磁盘
+ * 
+ * @param env 
+ * @param data 
+ * @param fname 
+ * @return LEVELDB_EXPORT 
+ */
+LEVELDB_EXPORT Status WriteStringToFileSync(Env* env, const Slice& data, const std::string& fname);
+
+/**
  * @brief 实用函数：从文件fname中读取数据到data中
  * 
  * @param env 
@@ -465,7 +475,9 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
   Status LockFile(const std::string& f, FileLock** l) override {
     return target_->LockFile(f, l);
   }
+
   Status UnlockFile(FileLock* l) override { return target_->UnlockFile(l); }
+  
   void Schedule(void (*f)(void*), void* a) override {
     return target_->Schedule(f, a);
   }
@@ -485,6 +497,7 @@ class LEVELDB_EXPORT EnvWrapper : public Env {
 
  private:
   Env* target_;
+};
 
 }  // namespace leveldb
 
