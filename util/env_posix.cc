@@ -1,8 +1,13 @@
 #include <atomic>
 #include <iostream>
+#include <sstream>
 #include <memory>
 #include <cassert>
 #include <set>
+#include <queue>
+#include <functional>
+#include <thread>
+#include <condition_variable>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -11,8 +16,12 @@
 #include <mutex>
 #include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <stdio.h>
 #include "leveldb/env.h"
 #include "util/env_posix_test_helper.h"
+#include "util/posix_logger.h"
 #include "port/thread_annotations.h"
 
 namespace leveldb {
@@ -419,6 +428,53 @@ private:
     std::set<std::string> lock_files_ GUARDED_BY(mu_);
 };
 
+class BackgroundWorks {
+public:
+    void Insert(void (*function)(void *), void* arg) {
+        std::lock_guard<std::mutex> lk(mu_);
+
+        if (!has_start_) {
+            has_start_ = true;
+            std::thread bg_thread(EntryPoint);
+            bg_thread.detach();
+        }
+
+        queues_.emplace(function, arg);
+        cv_.notify_one();
+    }
+
+private:
+    void EntryPoint() {
+        while (true) {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_.wait(lk, [this](){ return !queues_.empty(); });
+
+            auto work = queues_.front();
+            queues_.pop();
+
+            lk.unlock();
+            work.DoIt();
+        }
+    }
+
+    struct Work {
+        using FuncType = std::function<void(void*)>;
+        Work(FuncType func, void* arg) : func_(std::move(func)), arg_(arg) {}
+
+        void DoIt() {
+            func_(arg_);
+        }
+
+        FuncType func_;
+        void* const arg_;
+    };
+
+    std::mutex mu_;
+    std::condition_variable cv_ GUARDED_BY(mu_);
+    std::queue<Work> queues_ GUARDED_BY(mu_);
+    bool has_start_ = false GUARDED_BY(mu_);
+};
+
 class PosixEnv : public Env {
     PosixEnv() = default;
     ~PosixEnv() {
@@ -492,7 +548,162 @@ class PosixEnv : public Env {
         return Status::OK();
     }
 
-    
+    bool FileExists(const std::string& fname) override {
+        if (::access(fname.c_str(), F_OK) == 0) {
+            return true;
+        }
+        return false;
+    }
+
+    Status GetChildren(const std::string& dir, std::vector<std::string>* result) override {
+        result->clear();
+        DIR *dirp = ::opendir(dir.c_str());
+        if (dirp == nullptr) {
+            return PosixError(dir, errno);
+        }
+        // see man readdir
+        // To distinguish end of stream from an error, 
+        // set errno to zero before calling readdir() and then check the value of errno if NULL is returned.
+        errno = 0;
+        struct ::dirent* dirent = nullptr;
+        while ((::readdir(dirp)) != nullptr) {
+            result->emplace_back(dirent->d_name);
+        }
+        Status s;
+        if (errno != 0) {
+            s = PosixError(dir, errno);
+        }
+        if ((::closedir(dirp)) == -1) {
+            s = PosixError(dir, errno);
+        }
+        return s;
+    }
+
+    Status RemoveFile(const std::string& fname) override {
+        if (::unlink(fname.c_str()) == 0) {
+            return Status::OK();
+        }
+        return PosixError(fname, errno);
+    }
+
+    Status CreateDir(const std::string& dirname) override {
+        if (::mkdir(dirname.c_str(), kNewDirMode)) {
+            return Status::OK();
+        }
+        return PosixError(dirname, errno);
+    }
+
+    Status RemoveDir(const std::string& dirname) override {
+        if (::rmdir(dirname.c_str()) == 0) {
+            return Status::OK();
+        }
+        return PosixError(dirname, errno);
+    }
+
+    Status GetFileSize(const std::string& fname, uint64_t* file_size) override {
+        struct ::stat statbuf;
+        if (::stat(fname.c_str(), &statbuf) != 0) {
+            return PosixError(fname, errno);
+        }
+        *file_size = static_cast<uint64_t>(statbuf.st_size);
+        return Status::OK();
+    }
+
+    Status RenameFile(const std::string& src, const std::string& target) override {
+        if (::rename(src.c_str(), target.c_str()) == 0) {
+            return Status::OK();
+        }
+        return PosixError("rename file from " + src + " to " + target + " failed!", errno);
+    }
+
+    Status LockFile(const std::string& fname, FileLock** lock) override {
+        *lock = nullptr;
+        if (!lock_files_.Insert(fname)) {
+            return Status::IOError("lock " + fname, "already held by process");
+        }
+
+        int fd = ::open(fname.c_str(), O_RDWR | O_CREAT | kOpenBaseFlags, kNewFileMode);
+        if (fd == -1) {
+            return PosixError(fname, errno);
+        }
+
+        if (LockOrUnlock(fd, true) == -1) {
+            int lock_errno = errno;
+            ::close(fd);
+            lock_files_.Remove(fname);
+            return PosixError("lock " + fname, lock_errno);
+        }
+
+        *lock  = new PosixFileLock(fd, fname);
+        return Status::OK();
+    }
+
+    Status UnlockFile(FileLock** lock) {
+        PosixFileLock* plock = dynamic_cast<PosixFileLock*>(*lock);
+        if (LockOrUnlock(plock->fd(), false) == -1) {
+            return PosixError("unlock " + plock->filename(), errno);
+        }
+        
+        lock_files_.Remove(plock->filename());
+        Status s;
+        if (::close(plock->fd()) != 0) {
+            s = PosixError(plock->filename(), errno);
+        }
+        return s;
+    }
+
+    void Schedule(void(*function)(void* arg), void* arg) override {
+        works_.Insert(function, arg);
+    }
+
+    void StartThread(void(*function)(void* arg), void* arg) override {
+        std::thread t(function, arg);
+        t.detach();
+    }
+
+    Status GetTestDirectory(std::string* path) override {
+        const char* env = std::getenv("TEST_TMPDIR");
+        if (env && env[0] != '0') {
+            *path  = env;
+            return Status::OK();
+        }
+
+        std::stringstream ss;
+        ss << "/tmp/leveldbtest-" << ::getuid();
+        *path = ss.str();
+        
+        // 忽略创建目录的错误，因为目录可能已经存在
+        CreateDir(*path);
+        return Status::OK();
+    }
+
+    Status NewLogger(const std::string& fname, Logger** result) override {
+        *result = nullptr;
+        int fd = ::open(fname.c_str(), O_CREAT | O_APPEND | O_WRONLY | kOpenBaseFlags, kNewFileMode);
+        if (fd == -1) {
+            return PosixError(fname, errno);
+        }
+
+        std::FILE* file = ::fdopen(fd, "a");
+        if (file == nullptr) {
+            ::close(fd);
+            return PosixError(fname, errno);
+        }
+
+        *result = new PosixLogger(file);
+        return Status::OK();
+    }
+
+    uint64_t NowMicros() override {
+        static constexpr uint64_t kUsecPerSecond = 1000000;
+        struct ::timeval tv;
+        ::gettimeofday(&tv, nullptr);
+        return static_cast<uint64_t>(tv.tv_sec * kUsecPerSecond + tv.tv_usec);
+    }
+
+    void SleepForMicroseconds(int micros) override {
+        std::this_thread::sleep_for(std::chrono::microseconds(micros));
+    }
 
 private:
 
@@ -504,9 +715,19 @@ private:
      */
     static constexpr mode_t kNewFileMode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 
+    /**
+     * @brief 新创建的目录权限设置，有执行权限是为了可以搜索目录
+     * 创建者：读、写、执行
+     * 组用户：读、执行
+     * 其他用户：读、执行
+     */
+    static constexpr mode_t kNewDirMode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+
     PosixLockFileTable lock_files_; // thread-safe
     PosixFdLimiter fd_limiter_; // thread-safe
     PosixMMapLimiter mmap_limter_; // thread-safe
+
+    BackgroundWorks works_;
 };
 
 // Wraps an Env instance whose destructor is never created.

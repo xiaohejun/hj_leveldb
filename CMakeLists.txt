@@ -209,19 +209,19 @@ target_sources(leveldb
     # "${LEVELDB_PUBLIC_INCLUDE_DIR}/write_batch.h"
 )
 
-# if (WIN32)
-#   target_sources(leveldb
-#     PRIVATE
-#       "util/env_windows.cc"
-#       "util/windows_logger.h"
-#   )
-# else (WIN32)
-#   target_sources(leveldb
-#     PRIVATE
-#       "util/env_posix.cc"
-#       "util/posix_logger.h"
-#   )
-# endif (WIN32)
+if (WIN32)
+  # target_sources(leveldb
+  #   PRIVATE
+  #     "util/env_windows.cc"
+  #     "util/windows_logger.h"
+  # )
+else (WIN32)
+  target_sources(leveldb
+    PRIVATE
+      "util/env_posix.cc"
+      "util/posix_logger.h"
+  )
+endif (WIN32)
 
 # MemEnv is not part of the interface and could be pulled to a separate library.
 # target_sources(leveldb
