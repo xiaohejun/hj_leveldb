@@ -23,14 +23,21 @@
 #include "util/env_posix_test_helper.h"
 #include "util/posix_logger.h"
 #include "port/thread_annotations.h"
+#include "port/port.h"
 
 namespace leveldb {
 
 namespace {
 
+/**
+ * @brief 使用CRTP技法
+ * https://en.wikipedia.org/wiki/Curiously_Recurring_Template_Pattern
+ * 
+ */
+template <typename T>
 class Limiter {
 public:
-    Limiter() : acquires_allowed_(MaxAcquires()) {}
+    Limiter() : acquires_allowed_(static_cast<T*>(this)->MaxAcquires()) {}
 
     Limiter(const Limiter&) = delete;
     Limiter& operator=(const Limiter&) = delete;
@@ -51,23 +58,31 @@ public:
     }
 
 private:
-    virtual int MaxAcquires() = 0;
-
-private:
     std::atomic_int acquires_allowed_;
 };
 
-class PosixMMapLimiter final : public Limiter {
-private:
-    int MaxAcquires() override {
+class PosixMMapLimiter final : public Limiter<PosixMMapLimiter> {
+public:
+    int MaxAcquires() {
+        if (limit_ >= 0) {
+            return limit_;
+        }
         // 如果是64位操作系统，允许1000个mmap，32位系统，不允许？
         return sizeof(void*) >= 8 ? 1000 : 0;
     }
-};
 
-class PosixFdLimiter final : public Limiter {
 private:
-    int MaxAcquires() override {
+    friend class leveldb::EnvPosixTestHelper;
+    static int limit_; // just for test helper
+};
+int PosixMMapLimiter::limit_ = -1;
+
+class PosixFdLimiter final : public Limiter<PosixFdLimiter> {
+public:
+    int MaxAcquires() {
+        if (limit_ >= 0) {
+            return limit_;
+        }
         // 默认50个
         int fd_max_acquires = 50;
         struct ::rlimit rlim;
@@ -83,9 +98,13 @@ private:
             fd_max_acquires = rlim.rlim_cur / 5;
         }
         return fd_max_acquires;
-    }
-};
+   }
 
+private:
+    friend class leveldb::EnvPosixTestHelper;
+    static int limit_; // just for test helper
+};
+int PosixFdLimiter::limit_ = -1;
 
 Status PosixError(const std::string& context, error_t error_number)
 {
@@ -99,7 +118,7 @@ class PosixSequentialFile final : public SequentialFile {
 public:
     PosixSequentialFile(int fd, std::string fname) : fd_(fd), fname_(std::move(fname)) {}
 
-    ~PosixSequentialFile() { close(fd_); }
+    ~PosixSequentialFile() { ::close(fd_); }
 
     Status Read(size_t n, Slice* result, char* scratch) override {
         Status s;
@@ -144,13 +163,20 @@ constexpr const int kOpenBaseFlags = 0;
 class PosixRandomAccessFile final : public RandomAccessFile {
 public:
     PosixRandomAccessFile(int fd, std::string fname, PosixFdLimiter* fd_limiter)
-        : has_permanent_fd_(fd_limiter_->Acquire()),
-            fd_(has_permanent_fd_ ? fd : -1), fname_(std::move(fname)),
-            fd_limiter_(fd_limiter) {
+        : fd_limiter_(fd_limiter), has_permanent_fd_(fd_limiter->Acquire()),
+          fd_(has_permanent_fd_ ? fd : -1), fname_(std::move(fname)) {
             if (!has_permanent_fd_) {
                 assert(fd != -1);
-                close(fd);
+                ::close(fd);
             }
+    }
+
+    ~PosixRandomAccessFile() {
+        if (has_permanent_fd_) {
+            assert(fd_ != -1);
+            ::close(fd_);
+            fd_limiter_->Release();
+        }
     }
 
     Status Read(uint64_t offset, size_t n, Slice* result, char* scratch) override {
@@ -187,7 +213,7 @@ private:
 class PosixMmapReadableFile final : public RandomAccessFile {
 public:
     PosixMmapReadableFile(std::string fname, char *mmap_base, size_t length, PosixMMapLimiter* mmap_limiter)
-        : fname_(std::move(fname)), mmap_base_(mmap_base), length_(length), mmap_limiter_(mmap_limiter_) {}
+        : fname_(std::move(fname)), mmap_base_(mmap_base), length_(length), mmap_limiter_(mmap_limiter) {}
 
     ~PosixMmapReadableFile() {
         munmap(static_cast<void*>(mmap_base_), length_);
@@ -435,7 +461,7 @@ public:
 
         if (!has_start_) {
             has_start_ = true;
-            std::thread bg_thread(EntryPoint);
+            std::thread bg_thread([this]() { EntryPoint(); });
             bg_thread.detach();
         }
 
@@ -476,6 +502,7 @@ private:
 };
 
 class PosixEnv : public Env {
+public:
     PosixEnv() = default;
     ~PosixEnv() {
         std::cerr << "PosixEnv singleton destoryed. Unsupported behavior!\n" << std::endl;
@@ -638,8 +665,8 @@ class PosixEnv : public Env {
         return Status::OK();
     }
 
-    Status UnlockFile(FileLock** lock) {
-        PosixFileLock* plock = dynamic_cast<PosixFileLock*>(*lock);
+    Status UnlockFile(FileLock* lock) override {
+        PosixFileLock* plock = static_cast<PosixFileLock*>(lock);
         if (LockOrUnlock(plock->fd(), false) == -1) {
             return PosixError("unlock " + plock->filename(), errno);
         }
@@ -764,7 +791,7 @@ public:
     SingletonEnv(const SingletonEnv&) = delete;
     SingletonEnv& operator=(const SingletonEnv&) = delete;
 
-    Env* env() { return reinterpret_cast<Env*>(env_storage_); }
+    Env* env() { return reinterpret_cast<Env*>(&env_storage_); }
 
     static void AssertEnvNotInitialized() {
     #if !defined(NDEBUG)
@@ -789,19 +816,19 @@ using PosixDefaultEnv = SingletonEnv<PosixEnv>;
     
 }; // namespace
 
-void EnvPosixTestHelper::SetReadOnlyFdLimit(int limit)
+void EnvPosixTestHelper::SetReadOnlyFDLimit(int limit)
 {
     PosixDefaultEnv::AssertEnvNotInitialized();
-    g_open_read_only_file_limit = limit;
+    PosixFdLimiter::limit_ = limit;
 }
 
 void EnvPosixTestHelper::SetReadOnlyMMapLimit(int limit)
 {
     PosixDefaultEnv::AssertEnvNotInitialized();
-    g_mmap_limit = limit;
+    PosixMMapLimiter::limit_ = limit;
 }
 
-Env* Env::Defalut() {
+Env* Env::Default() {
     static PosixDefaultEnv env_container;
     return env_container.env();
 }

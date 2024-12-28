@@ -319,7 +319,7 @@ if(LEVELDB_BUILD_TESTS)
       PRIVATE
         "${PROJECT_BINARY_DIR}/${LEVELDB_PORT_CONFIG_DIR}/port_config.h"
         # "util/testutil.cc"
-        # "util/testutil.h"
+        "util/testutil.h"
 
         "${test_file}"
     )
@@ -377,11 +377,11 @@ if(LEVELDB_BUILD_TESTS)
 
     # TODO(costan): This test also uses
     #               "util/env_{posix|windows}_test_helper.h"
-    # if (WIN32)
-    #   leveldb_test("util/env_windows_test.cc")
-    # else (WIN32)
-    #   leveldb_test("util/env_posix_test.cc")
-    # endif (WIN32)
+    if (WIN32)
+      leveldb_test("util/env_windows_test.cc")
+    else (WIN32)
+      leveldb_test("util/env_posix_test.cc")
+    endif (WIN32)
   endif(NOT BUILD_SHARED_LIBS)
 endif(LEVELDB_BUILD_TESTS)
 

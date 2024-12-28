@@ -31,7 +31,7 @@ class LEVELDB_EXPORT Env {
    *
    * @return Env*
    */
-  static Env* Defalut();
+  static Env* Default();
 
   /**
    * @brief 创建一个SequentialFile对象用于顺序读文件，文件的路径名是fname

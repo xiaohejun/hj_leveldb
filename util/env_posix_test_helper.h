@@ -9,7 +9,7 @@ class EnvPosixTestHelper {
 private:
     friend class EnvPosixTest;
 
-    static void SetReadOnlyFdLimit(int limit);
+    static void SetReadOnlyFDLimit(int limit);
 
     static void SetReadOnlyMMapLimit(int limit);
 };

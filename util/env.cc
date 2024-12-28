@@ -76,12 +76,12 @@ static Status DoWriteStringToFile(Env* env, const Slice&data, const std::string&
 
 Status WriteStringToFile(Env* env, const Slice& data, const std::string& fname)
 {
-    DoWriteStringToFile(env, data, fname, false);
+    return DoWriteStringToFile(env, data, fname, false);
 }
 
 Status WriteStringToFileSync(Env* env, const Slice& data, const std::string& fname)
 {
-    DoWriteStringToFile(env, data, fname, true);
+    return DoWriteStringToFile(env, data, fname, true);
 }
 
 Status ReadFileToString(Env* env, const std::string& fname, std::string* data)

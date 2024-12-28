@@ -24,7 +24,7 @@ public:
         // 拼接日志信息的时候优先使用栈内存，因为栈内存开辟比堆内存快，
         // 还有如果是打印少量的日志的时候，避免频繁开辟小块堆内存，
         // 造成大量的内存碎片
-        static constexpr uint8_t kBuffsize = 512;
+        static constexpr uint8_t kBuffsize = static_cast<uint8_t>(512);
         static char stack_buffer[kBuffsize];
 
         // 获取时间戳
@@ -34,7 +34,7 @@ public:
         ::localtime_r(&tv.tv_sec, &result);
         int offset = 0;
         int cur = std::snprintf(stack_buffer + offset, kBuffsize - offset,
-            "%04d/%02d/%02d-%02d:%02d:%02d.%06d",
+            "%04d/%02d/%02d-%02d:%02d:%02d.%06ld",
             result.tm_year + 1970, result.tm_mon + 1, result.tm_mday,
             result.tm_hour, result.tm_min, result.tm_sec, tv.tv_usec);
         // 当前只是加入了一个时间戳，不应该出错
